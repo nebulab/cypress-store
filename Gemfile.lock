@@ -90,6 +90,7 @@ GEM
     crass (1.0.4)
     cypress-on-rails (1.4.1)
       rack
+    database_cleaner (1.7.0)
     devise (4.6.2)
       bcrypt (~> 3.0)
       orm_adapter (~> 0.1)
@@ -349,6 +350,7 @@ DEPENDENCIES
   byebug
   coffee-rails (~> 4.2)
   cypress-on-rails (~> 1.0)
+  database_cleaner
   jbuilder (~> 2.5)
   listen (>= 3.0.5, < 3.2)
   pg (>= 0.18, < 2.0)
