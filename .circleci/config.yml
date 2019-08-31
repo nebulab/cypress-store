@@ -1,0 +1,164 @@
+version: 2.1
+executors:
+  cypress_store_executor:
+    docker:
+      - image: circleci/ruby:2.6.3-stretch
+        environment:
+          BUNDLE_JOBS: 3
+          BUNDLE_RETRY: 3
+          BUNDLE_PATH: vendor/bundle
+          PGHOST: 127.0.0.1
+          PGUSER: cypress-store
+          RAILS_ENV: test
+      - image: circleci/postgres:9.5-alpine
+        environment:
+          POSTGRES_USER: cypress-store
+          POSTGRES_DB: cypress-store_test
+          POSTGRES_PASSWORD: ''
+
+commands:
+  bundle:
+    description: 'Install and cache gems'
+    steps:
+      - run: bundle -v || gem install bundler
+      - restore_cache:
+          keys:
+            - cypress-store-bundle-v2-{{ checksum "Gemfile.lock" }}
+            - cypress-store-bundle-v2-
+      - run: bundle check || bundle install
+      - save_cache:
+          key: cypress-store-bundle-v2-{{ checksum "Gemfile.lock" }}
+          paths:
+            - vendor/bundle
+  yarn:
+    description: 'Install and cache node packages'
+    steps:
+      - restore_cache:
+          keys:
+            - cypress-store-yarn-{{ checksum "yarn.lock" }}
+            - cypress-store-yarn-
+      - restore_cache:
+          keys:
+            - cypress-store-rails-cache-{{ .Branch }}
+            - cypress-store-rails-cache-master
+      - run:
+          name: Install nvm
+          command: |
+            set +e
+            touch $BASH_ENV
+            curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.34.0/install.sh | bash
+            echo 'export NVM_DIR="$HOME/.nvm"' >> $BASH_ENV
+            echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >> $BASH_ENV
+      - run:
+          name: Install node version
+          command: |
+            nvm install v12.6.0
+            echo 'nvm alias default v12.6.0' >> $BASH_ENV
+      - run:
+          name: Yarn Install
+          command: |
+            npm install -g yarn
+            yarn install --cache-folder ~/.cache/yarn
+      - save_cache:
+          key: cypress-store-rails-cache-{{ .Branch }}
+          paths:
+            - tmp/cache
+      - save_cache:
+          key: cypress-store-yarn-{{ checksum "yarn.lock" }}
+          paths:
+            - .cache/yarn
+  prepare_db:
+    description: 'Setup database'
+    steps:
+      - run:
+          name: Wait for DB
+          command: dockerize -wait tcp://localhost:5432 -timeout 1m
+      - run:
+          name: Database setup
+          command: |
+            bin/rails db:create --trace
+            bin/rails db:schema:load --trace
+  compile_assets:
+    steps:
+      - restore_cache:
+          keys:
+            - asset-cache-{{ .Branch }}
+            - asset-cache-master
+            - asset-cache-
+      - run:
+          name: Compile assets
+          command: bundle exec rails assets:precompile
+      - save_cache:
+          key: asset-cache-{{ .Branch }}-{{ epoch }}
+          paths:
+            - public/assets
+            - tmp/cache/assets/sprockets
+jobs:
+  rspec:
+    executor: cypress_store_executor
+    parallelism: 1
+    steps:
+      - checkout
+      - bundle
+      - yarn
+      - prepare_db
+      - run:
+          name: Run rspec in parallel
+          command: |
+            export TEST_FILES="$(circleci tests glob "spec/**/*_spec.rb" | circleci tests split --split-by=timings)"
+            export RAND_SEED=`ruby -e"print rand(0xFFFF)"`
+            echo bundle exec rspec --seed $RAND_SEED $TEST_FILES
+            mkdir /tmp/test-results
+            bundle exec rspec --seed $RAND_SEED \
+                              --format progress \
+                              $TEST_FILES
+      - store_test_results:
+          path: test_results
+
+  cypress:
+    executor: cypress_store_executor
+    parallelism: 2
+    resource_class: medium+
+    steps:
+      - checkout
+      - bundle
+      - yarn
+      - prepare_db
+      - compile_assets
+      - run:
+          name: Install cypress OSS dependencies
+          command: sudo apt-get install xvfb libgtk2.0-0 libnotify-dev libgconf-2-4 libnss3 libxss1 libasound2
+      - run: mkdir -p tmp/pids && rm -f tmp/pids/*
+
+      - run:
+          name: Run rails server in background
+          command: bundle exec rails server -e test -p 5002
+          background: true
+      - run:
+          name: Wait for server
+          command: |
+            until $(curl --retry 10 --output /dev/null --silent --head --fail http://127.0.0.1:5002/admin); do
+                printf '.'
+                sleep 5
+            done
+      - run:
+          name: Executes Cypress end-to-end tests
+          command: |
+            export TEST_FILES="$(circleci tests glob "spec/cypress/**/*.spec.js" | circleci tests split --split-by=timings)"
+            export TEST_FILES="$(ruby -rshellwords -e'print ENV["TEST_FILES"].shellsplit.join(",")')"
+            echo yarn run cypress run --project ./spec --spec $TEST_FILES
+            yarn run cypress run --project ./spec --spec $TEST_FILES
+      - store_artifacts:
+          path: spec/cypress/videos
+      - store_artifacts:
+          path: spec/cypress/screenshots
+      - run:
+          name: Kill test server after running Cypress
+          command: kill -9 $(cat tmp/pids/server.pid)
+
+workflows:
+  version: 2
+  build_rspec_cypress:
+    jobs:
+      - rspec
+      - cypress
